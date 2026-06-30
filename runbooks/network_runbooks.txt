@@ -1,0 +1,81 @@
+RUNBOOK ID: MPLS-001
+TITLE: MPLS RSVP-TE Latency Spike
+SYMPTOMS: RSVP_TE_Latency_ms rising above 150ms, OSPF_Cost_Metric elevated (60-120)
+LIKELY CAUSE: Traffic-engineered LSP (Label Switched Path) congestion or a downstream PE router queuing delay. OSPF cost climbing means the IGP is detecting a degraded path and may be about to reroute.
+REMEDIATION STEPS:
+1. Check LSP utilization on the affected RSVP-TE tunnel via 'show mpls traffic-eng tunnels' — if utilization exceeds 80%, the path is congested.
+2. Verify if a backup LSP (FRR - Fast Reroute) is configured and pre-signaled for this path.
+3. If no backup exists, manually trigger a CSPF recalculation to find an alternate path before the primary fails completely.
+4. Escalate to WAN team if congestion persists beyond 10 minutes — may require bandwidth reservation increase.
+
+---
+
+RUNBOOK ID: MPLS-002
+TITLE: MPLS BGP Peer Flapping
+SYMPTOMS: BGP_Peer_Flaps above 4 in a short window, intermittent IPSec_Tunnel_Status drops
+LIKELY CAUSE: BGP session instability, often caused by a flapping physical interface, MTU mismatch, or keepalive timer misconfiguration between PE routers.
+REMEDIATION STEPS:
+1. Check interface error counters ('show interface') on both ends of the BGP session for CRC errors or input drops.
+2. Verify BGP keepalive/hold timers match on both peers — mismatch causes session resets.
+3. If flaps correlate with high RSVP-TE latency, this may be a single root cause (link saturation) triggering both — investigate the physical link first.
+4. If flapping continues, apply BGP dampening temporarily to prevent route table churn while root cause is fixed.
+
+---
+
+RUNBOOK ID: MPLS-003
+TITLE: MPLS Interface Drop Rate Critical
+SYMPTOMS: Interface_Drop_Rate_Pct above 5%, IPSec_Tunnel_Status toggling between 0 and 1
+LIKELY CAUSE: Physical layer issue (fiber degradation, faulty SFP) or severe congestion causing tail-drop on the egress queue.
+REMEDIATION STEPS:
+1. Check physical layer stats — optical power levels, CRC errors, light levels on SFP/transceiver.
+2. If physical layer is clean, check QoS queue drop counters — congestion-based drops need traffic shaping adjustment.
+3. Failover traffic to backup MPLS path if available before drop rate worsens.
+4. If this is a core hub-facing link, prioritize escalation — hub failures cascade to all dependent spoke sites.
+
+---
+
+RUNBOOK ID: SDWAN-001
+TITLE: SD-WAN Jitter Spike on Overlay Tunnel
+SYMPTOMS: Jitter_ms above 40ms, WAN_Path_Score dropping below 60
+LIKELY CAUSE: Underlying internet/broadband transport congestion, ISP-level issue, or last-mile circuit instability. Common on overseas SD-WAN links during peak hours.
+REMEDIATION STEPS:
+1. Check SD-WAN controller's per-path quality metrics for all available underlay transports (MPLS, broadband, LTE) at this site.
+2. If a secondary transport has better WAN_Path_Score, trigger application-aware routing failover immediately.
+3. Run a traceroute/MTR over the affected path to isolate which hop is introducing jitter — likely the ISP's edge router.
+4. If jitter is consistently from a specific ISP, file an underlay circuit ticket with the provider while routing traffic over the alternate path.
+
+---
+
+RUNBOOK ID: SDWAN-002
+TITLE: SD-WAN WAN Path Score Critical Drop
+SYMPTOMS: WAN_Path_Score below 40, multiple BGP_Peer_Flaps, IPSec_Tunnel_Status unstable
+LIKELY CAUSE: The SD-WAN edge's composite health score (latency + jitter + loss) has degraded sharply — usually indicates the entire underlay transport is failing, not just one metric.
+REMEDIATION STEPS:
+1. Immediately check if automatic failover to a backup transport has triggered — SD-WAN controllers usually auto-failover below score 50.
+2. If failover hasn't triggered, manually force the path preference to the healthier transport.
+3. Check IPSec tunnel renegotiation logs — repeated Phase 1/Phase 2 failures often accompany WAN score collapse.
+4. This pattern often precedes a full SD-WAN link outage within minutes — treat as high priority.
+
+---
+
+RUNBOOK ID: SDWAN-003
+TITLE: SD-WAN IPSec Tunnel Instability
+SYMPTOMS: IPSec_Tunnel_Status toggling, BGP_Peer_Flaps elevated, Interface_Drop_Rate_Pct rising
+LIKELY CAUSE: IKE/IPSec rekey failures, often due to underlying packet loss interrupting the negotiation handshake, or a misconfigured DPD (Dead Peer Detection) timer.
+REMEDIATION STEPS:
+1. Check IPSec negotiation logs for repeated Phase 1 (IKE) failures — indicates handshake packets are being dropped.
+2. Verify DPD timers aren't too aggressive (tearing down tunnels on transient loss).
+3. If underlay loss is the root cause, this is a symptom not the disease — fix the underlying transport quality first.
+4. As an interim step, enable a backup tunnel over a secondary transport to maintain connectivity during remediation.
+
+---
+
+RUNBOOK ID: HUB-001
+TITLE: Hub-Core Cascading Failure
+SYMPTOMS: Multiple links (both MPLS and SD-WAN) showing simultaneous degradation across different spoke sites
+LIKELY CAUSE: The hub router/site itself is under stress — CPU overload, hub-facing uplink saturation, or a hub-level hardware/power issue. This is NOT an individual link problem.
+REMEDIATION STEPS:
+1. Check Hub-Core router CPU and memory utilization immediately — cascading multi-link degradation strongly suggests a hub-side bottleneck, not per-link issues.
+2. Verify hub uplink bandwidth utilization — if the hub's own upstream connection is saturated, all downstream links will show symptoms simultaneously.
+3. Do NOT troubleshoot individual spoke links first in this scenario — fix the hub, and spoke symptoms should clear automatically.
+4. If hub hardware fault is suspected, failover to redundant hub controller/router if available.
