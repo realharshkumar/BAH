@@ -7,6 +7,8 @@ import joblib
 import pandas as pd
 import random
 import time
+from tensorflow import keras
+import numpy as np
 
 from copilot import generate_remediation, identify_top_feature
 
@@ -55,13 +57,19 @@ all_links = [(u, v, d['link_type']) for u, v, d in G.edges(data=True)]
 # ─────────────────────────────────────────────
 # 2. LOAD MODEL
 # ─────────────────────────────────────────────
+WINDOW_SIZE = 5
+
 @st.cache_resource
 def load_model():
-    model = joblib.load('network_model.pkl')
+    model = keras.models.load_model('network_model.keras')
     feature_cols = joblib.load('model_features.pkl')
-    return model, feature_cols
+    try:
+        threshold = joblib.load('model_threshold.pkl')
+    except FileNotFoundError:
+        threshold = 0.5
+    return model, feature_cols, threshold
 
-model, feature_cols = load_model()
+model, feature_cols, THRESHOLD = load_model()
 
 # ─────────────────────────────────────────────
 # 3. METRIC GENERATORS (live simulation, mirrors data_generator.py)
@@ -94,32 +102,44 @@ def generate_live_metrics(link_type, stressed=False):
 # ─────────────────────────────────────────────
 # 4. RUN MODEL PREDICTION ON A LINK'S METRICS
 # ─────────────────────────────────────────────
-def predict_link(link_type, metrics):
-    row = {col: 0 for col in feature_cols}
+def metrics_to_row(link_type, metrics):
+    row = {col: 0.0 for col in feature_cols}
     for col in ['RSVP_TE_Latency_ms', 'OSPF_Cost_Metric', 'Jitter_ms', 'WAN_Path_Score',
                 'BGP_Peer_Flaps', 'IPSec_Tunnel_Status']:
         if col in row:
             row[col] = metrics.get(col) or 0
 
-    type_col = f"Type_{link_type}"
+    type_col = f"Link_Type_{link_type}"
     if type_col in row:
-        row[type_col] = 1
+        row[type_col] = 1.0
 
-    X = pd.DataFrame([row])[feature_cols]
-    pred = model.predict(X)[0]
-    proba = model.predict_proba(X)[0][1]  # confidence of "failure imminent" class
+    return [row[col] for col in feature_cols]
+
+def predict_link(history):
+    # history: list of last WINDOW_SIZE rows (each a list of feature values)
+    if len(history) < WINDOW_SIZE:
+        return 0, 0.0
+    X = np.array(history[-WINDOW_SIZE:], dtype=np.float32)[None, :, :]
+    proba = float(model.predict(X, verbose=0)[0][0])
+    pred = int(proba >= THRESHOLD)
     return pred, proba
 
 # ─────────────────────────────────────────────
 # 5. SIMULATE LIVE STATE FOR ALL LINKS (session state, persists across reruns)
 # ─────────────────────────────────────────────
+if "link_history" not in st.session_state:
+    st.session_state.link_history = {f"{s}->{d}": [] for s, d, _ in all_links}
+
 if "link_state" not in st.session_state:
     st.session_state.link_state = {}
     for src, dst, ltype in all_links:
         key = f"{src}->{dst}"
         stressed = random.random() < 0.15  # ~15% of links start in stressed state for demo visibility
-        metrics = generate_live_metrics(ltype, stressed=stressed)
-        pred, proba = predict_link(ltype, metrics)
+        # seed history with WINDOW_SIZE rows so a prediction is available immediately
+        for _ in range(WINDOW_SIZE):
+            metrics = generate_live_metrics(ltype, stressed=stressed)
+            st.session_state.link_history[key].append(metrics_to_row(ltype, metrics))
+        pred, proba = predict_link(st.session_state.link_history[key])
         st.session_state.link_state[key] = {
             'src': src, 'dst': dst, 'link_type': ltype,
             'metrics': metrics, 'prediction': pred, 'confidence': proba
@@ -130,7 +150,9 @@ def refresh_link_state():
         key = f"{src}->{dst}"
         stressed = random.random() < 0.15
         metrics = generate_live_metrics(ltype, stressed=stressed)
-        pred, proba = predict_link(ltype, metrics)
+        st.session_state.link_history[key].append(metrics_to_row(ltype, metrics))
+        st.session_state.link_history[key] = st.session_state.link_history[key][-WINDOW_SIZE:]
+        pred, proba = predict_link(st.session_state.link_history[key])
         st.session_state.link_state[key] = {
             'src': src, 'dst': dst, 'link_type': ltype,
             'metrics': metrics, 'prediction': pred, 'confidence': proba
